@@ -571,7 +571,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='Walker2d-v3')
-    parser.add_argument('--hid', type=str, default="[64,32]")
+    parser.add_argument('--hid', type=str, default="[32,32]")
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--cpu', type=int, default=4)

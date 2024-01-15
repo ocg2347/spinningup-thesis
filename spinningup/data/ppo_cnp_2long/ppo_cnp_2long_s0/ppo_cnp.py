@@ -8,32 +8,21 @@ from spinup.utils.logx import EpochLogger
 import shutil
 import os
 
-context_window_len=10
-n_context_max=5
+context_window_len=5
+n_context_max=0
 use_time_input=True
-n_alternative_actions=3
-train_alt_pi_iters=5
-grad_norm_clip=0.5
-
-class WorldModel: # :)
-    def __init__(self, env):
-        self.env = env
-    def step(self, a):
-        qpos0, qvel0 = self.env.sim.data.qpos.flat.copy(), self.env.sim.data.qvel.flat.copy()
-        s, r, d, _ = self.env.step(a)
-        self.env.set_state(qpos0, qvel0)
-        return s, r, d, _
-
+    
 class PPOBuffer:
     def __init__(self, cont_dim, size, gamma=0.99, lam=0.95):
         
         self.n_context_max = max(1, n_context_max)
         self.cont_dim = cont_dim
-        self.gamma, self.lam = gamma, lam
-        self.max_size = size
+        self.cont_buf, self.obs_buf, self.act_buf = [], [], []
+        self.rew_buf, self.val_buf, self.logp_buf = [], [], []
         
-        self.reset()
-
+        self.cont_out, self.obs_out, self.act_out = [], [], []
+        self.ret_out, self.logp_out, self.adv_out = [], [], []
+        
         self.gamma, self.lam = gamma, lam
         self.max_size = size
 
@@ -43,11 +32,10 @@ class PPOBuffer:
     
     @property
     def total_size(self):
-        return len(self.obs_out)
+        return self.rollout_size + len(self.obs_out)
     
-    def store(self, conts, obs, act, rew, val, logp,
-              alt_conts, alt_obss, alt_acts, alt_rews, alt_vals="nan"):
-
+    def store(self, conts, obs, act, rew, val, logp):
+        # print("store: ",conts, obs, act, rew, val, logp)
         self.cont_buf.append(conts)
         self.obs_buf.append(obs)
         self.act_buf.append(act)
@@ -55,17 +43,11 @@ class PPOBuffer:
         self.val_buf.append(val)
         self.logp_buf.append(logp)
         
-        self.cont_buf_alt.append(alt_conts)
-        self.obs_buf_alt.append(alt_obss)
-        self.act_buf_alt.append(alt_acts)
-        self.rew_buf_alt.append(alt_rews)
-        self.val_buf_alt.append(alt_vals)
-        
+
     def finish_path(self, last_val=0):
-        
+
         assert len(self.act_buf) == len(self.obs_buf) == len(self.rew_buf) == len(self.val_buf) == len(self.logp_buf) == len(self.cont_buf)
 
-        ### For actions taken:
         self.obs_out.extend(self.obs_buf)
         self.act_out.extend(self.act_buf)
         self.cont_out.extend(self.cont_buf)
@@ -73,31 +55,22 @@ class PPOBuffer:
         
         self.rew_buf.append(last_val)
         self.val_buf.append(last_val)
+        
         rews = np.array(self.rew_buf)
         vals = np.array(self.val_buf)
+
         # the next two lines implement GAE-Lambda advantage calculation
         deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
         self.adv_out.extend(core.discount_cumsum(deltas, self.gamma * self.lam))
+        
         # the next line computes rewards-to-go, to be targets for the value function
         self.ret_out.extend(core.discount_cumsum(rews, self.gamma)[:-1])
 
-        ### For imagined actions:
-        assert len(self.act_buf_alt) == len(self.obs_buf_alt) == len(self.rew_buf_alt) == len(self.val_buf_alt) == len(self.cont_buf_alt)
-        M = len(self.act_buf_alt)
-        for i in range(M):
-            mean_r_alt, std_r_alt = np.mean(self.rew_buf_alt[i]), np.std(self.rew_buf_alt[i])
-            assert len(self.act_buf_alt[i]) == len(self.obs_buf_alt[i]) == len(self.rew_buf_alt[i]) == len(self.val_buf_alt[i]) == len(self.cont_buf_alt[i])
-            for cont_alt, obs_alt, act_alt, rew_alt in zip(self.cont_buf_alt[i], self.obs_buf_alt[i], self.act_buf_alt[i], self.rew_buf_alt[i]):
-                self.obs_out_alt.append(obs_alt)
-                self.act_out_alt.append(act_alt)
-                self.cont_out_alt.append(cont_alt)
-                self.adv_out_alt.append((rew_alt - mean_r_alt) / std_r_alt)
-                
         self.reset_rollout()
         
     def prepare_context_and_mask_batch(self, cont_list):
-
-        M = len(cont_list)
+        assert len(cont_list) == len(self.obs_out) == len(self.act_out) == len(self.adv_out) == len(self.ret_out) == len(self.logp_out)
+        M = len(self.obs_out)
         context_batch = torch.zeros(M, self.n_context_max, self.cont_dim, dtype=torch.float32)
         cont_mask_batch = torch.zeros(M, self.n_context_max, dtype=torch.float32)
         for i in range(M):
@@ -113,36 +86,24 @@ class PPOBuffer:
         if not self.total_size == self.max_size:    # buffer has to be full before you can get
             print(f"Warning: buffer has to be full before you can get, current size: {self.total_size}")
             print("get: obs_buf: ", len(self.obs_buf))
-        
-        # Actions taken
+            
+        # print("get: rollout_size: ", self.rollout_size)
+        # print("get: total_size: ", self.total_size)
         # the next two lines implement the advantage normalization trick
         adv_mean, adv_std = np.mean(self.adv_out), np.std(self.adv_out)
+        
         adv_out = (self.adv_out - adv_mean) / adv_std
 
         # context_batch: M x n_context_max x (obs_dim + act_dim)
         # cont_mask_batch: M x n_context_max    
-        assert len(self.cont_out) == len(self.obs_out) == len(self.act_out) == len(self.ret_out) == len(self.logp_out) == len(self.adv_out)
         context_batch_out, cont_mask_batch_out = self.prepare_context_and_mask_batch(self.cont_out)
-        assert context_batch_out.shape == (len(self.cont_out), self.n_context_max, self.cont_dim)
-        assert cont_mask_batch_out.shape == (len(self.cont_out), self.n_context_max)
         obs_out = np.stack(self.obs_out)
         obs_out = torch.tensor(obs_out, dtype=torch.float32)
-        obs_out = obs_out.unsqueeze(1) # (M, obs_dim)->(M, 1, obs_dim)
+        obs_out = obs_out.unsqueeze(1) # (M, 1, obs_dim)
         act_out = np.stack(self.act_out) # (M, act_dim)
         act_out = torch.tensor(act_out, dtype=torch.float32)
-        act_out = act_out.unsqueeze(1) # (M, act_dim)->(M, 1, act_dim)
+        act_out = act_out.unsqueeze(1) # (M, 1, act_dim)
 
-        # Imagined actions
-        assert len(self.cont_out_alt) == len(self.obs_out_alt) == len(self.act_out_alt) == len(self.adv_out_alt)
-        print("cont_out_alt: ", len(self.cont_out_alt))
-        context_batch_out_alt, cont_mask_batch_out_alt = self.prepare_context_and_mask_batch(self.cont_out_alt)
-        obs_out_alt = np.stack(self.obs_out_alt)
-        obs_out_alt = torch.tensor(obs_out_alt, dtype=torch.float32)
-        obs_out_alt = obs_out_alt.unsqueeze(1) # (M, obs_dim)->(M, 1, obs_dim)
-        act_out_alt = np.stack(self.act_out_alt) # (M, act_dim)
-        act_out_alt = torch.tensor(act_out_alt, dtype=torch.float32)
-        act_out_alt = act_out_alt.unsqueeze(1) # (M, act_dim)->(M, 1, act_dim)
-        
         data = dict(
             cont=context_batch_out,
             cont_mask=cont_mask_batch_out,
@@ -151,31 +112,20 @@ class PPOBuffer:
             ret=torch.tensor(self.ret_out, dtype=torch.float32).reshape(-1,1,1),
             adv=torch.tensor(adv_out, dtype=torch.float32).reshape(-1,1,1),
             logp=torch.tensor(self.logp_out, dtype=torch.float32).reshape(-1,1,1),
-            cont_alt=context_batch_out_alt,
-            cont_mask_alt=cont_mask_batch_out_alt,
-            obs_alt=obs_out_alt,
-            act_alt=act_out_alt,
-            adv_alt=torch.tensor(self.adv_out_alt, dtype=torch.float32).reshape(-1,1,1),
         )
         self.reset()
         return data
-        
+
     def reset_rollout(self):
-        # Taken actions
         self.cont_buf, self.obs_buf, self.act_buf = [], [], []
         self.rew_buf, self.val_buf, self.logp_buf = [], [], []
-        # Imagined actions
-        self.cont_buf_alt, self.obs_buf_alt, self.act_buf_alt = [], [], []
-        self.rew_buf_alt, self.val_buf_alt = [], []
         
     def reset(self):
         self.reset_rollout()
-        # Actions taken
         self.cont_out, self.obs_out, self.act_out = [], [], []
         self.ret_out, self.logp_out, self.adv_out = [], [], []
-        # Imagined actions
-        self.cont_out_alt, self.obs_out_alt, self.act_out_alt= [], [], []
-        self.adv_out_alt = []
+        
+
 
 def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
@@ -316,18 +266,9 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
     env = env_fn()
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
-    obs_dim = obs_dim + 1 if use_time_input else obs_dim
-    context_dim = obs_dim + act_dim
 
-    # World Model
-    world_model = WorldModel(env)
-    
     # Create actor-critic module
-    ac = actor_critic(env.observation_space, 
-                      env.action_space, 
-                      use_time_input=use_time_input, 
-                      encoder_output_size=8,
-                      **ac_kwargs)
+    ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
 
     # Count variables
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.v])
@@ -335,13 +276,14 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
 
     # Set up experience buffer
     local_steps_per_epoch = int(steps_per_epoch / 1)
-    buf = PPOBuffer(cont_dim=context_dim, size=local_steps_per_epoch)
+    buf = PPOBuffer(cont_dim=obs_dim+act_dim, size=local_steps_per_epoch)
     
+
     # sample action using the last s,a as context and current s as target
     @torch.no_grad()
     def sample_action(o, deterministic=False):
         if buf.rollout_size == 0 or context_window_len == 0 or n_context_max == 0:
-            context_points = torch.zeros(1, 1, context_dim, dtype=torch.float32)
+            context_points = torch.zeros(1, 1, obs_dim + act_dim, dtype=torch.float32)
         else:
             context_window_idxes = np.arange(
                 2, min(context_window_len, buf.rollout_size) + 1
@@ -368,6 +310,7 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
             ).unsqueeze(
                 0
             )  # (1 x n_context, dim_context)
+
         a_mean, a_std = ac.pi.cnp(
             observation=context_points,
             target=torch.as_tensor(o, dtype=torch.float32).reshape(1, 1, obs_dim),
@@ -377,10 +320,12 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
             a = a_mean
         else:
             a = torch.normal(a_mean, a_std)
+
+        # print(f"a_mean: {a_mean.shape}, a_std: {a_std.shape}")
         # compute log prob of the action using a_man, a_std
         a_dist = torch.distributions.Normal(a_mean, a_std)
+        # print(a_dist)
         log_p = a_dist.log_prob(a).sum()  # (1, 1, act_dim) -> (1, 1)
-        
         return (
             a.numpy(),
             log_p.item(),
@@ -388,10 +333,16 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
         )
     # Set up function for computing PPO policy loss
     def compute_loss_pi(data):
-        
         obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
         cont, cont_mask = data['cont'], data['cont_mask']
-
+        
+        # # Policy loss
+        # print("compute_loss_pi: obs: ", obs.shape)
+        # print("compute_loss_pi: cont: ", cont.shape)
+        # print("compute_loss_pi: cont_mask: ", cont_mask.shape)
+        # print("compute_loss_pi: act: ", act.shape)
+        # print("compute_loss_pi: adv: ", adv.shape)
+        # print("compute_loss_pi: logp_old: ", logp_old.shape)
         pi, logp = ac.pi(
             observation=cont, 
             target=obs,
@@ -415,9 +366,6 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
     # Set up function for computing value loss
     def compute_loss_v(data):
         obs, ret = data['obs'], data['ret']
-        if use_time_input:
-            obs = obs[:, 0, 1:]
-        ret = ret.reshape(-1, 1)
         return ((ac.v(obs) - ret)**2).mean()
 
     # Set up optimizers for policy and value function
@@ -429,9 +377,6 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
 
     def update():
         data = buf.get()
-        # for k, v in data.items(): 
-        #     print(f"{k}: {v.shape}")
-
         buf.reset()
         
         pi_l_old, pi_info_old = compute_loss_pi(data)
@@ -448,25 +393,8 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
                 break
             loss_pi.backward()
             pi_optimizer.step()
-            
-        logger.store(StopIter=i)
 
-        # Alternative actions stuff              
-        cont_alt, cont_mask = data['cont_alt'], data['cont_mask_alt']
-        obs_alt, act_alt, adv_alt = data['obs_alt'], data['act_alt'], data['adv_alt']
-        for i in range(train_alt_pi_iters):
-            pi_optimizer.zero_grad()
-            _, logp = ac.pi(
-                observation=cont_alt, 
-                target=obs_alt,
-                target_truth=act_alt,
-                observation_mask=cont_mask
-            ) # (M, 1, 1)
-            loss = (-(logp * adv_alt)/10).mean()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(ac.pi.parameters(), grad_norm_clip)
-            pi_optimizer.step()
-            
+        logger.store(StopIter=i)
 
         # Value function learning
         for i in range(train_v_iters):
@@ -491,33 +419,20 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
         for t in range(local_steps_per_epoch):
             # a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
             v = ac.v(torch.as_tensor(o, dtype=torch.float32)).detach().numpy()
-            if use_time_input:
-                o = np.insert(o, 0, 0.0)  # insert 0 in the beginning!!!
             a, logp, context_points = sample_action(o)
             
-            # alternative actions stuff
-            alt_conts = []
-            alt_obss = []
-            alt_acts = []
-            alt_rews = []
-            # alt_vals = []
-            for _ in range(n_alternative_actions):
-                a_alt, logp_alt, context_alt = sample_action(o)
-                alt_conts.append(context_alt)
-                alt_obss.append(o)
-                alt_acts.append(a_alt)
-                s_alt, r_alt, d_alt, _ = world_model.step(a_alt)
-                alt_rews.append(r_alt)
-                # alt_vals.append(ac.v(torch.as_tensor(s_alt, dtype=torch.float32)).detach().numpy())
-                        
             next_o, r, d, _ = env.step(a)
             ep_ret += r
             ep_len += 1
 
             # save and log
             buf.store(
-                conts=context_points,obs=o,act=a,rew=r,val=v,logp=logp,
-                alt_conts=alt_conts, alt_obss=alt_obss, alt_acts=alt_acts, alt_rews=alt_rews
+                conts=context_points,
+                obs=o,
+                act=a,
+                rew=r,
+                val=v,
+                logp=logp,
             )
             logger.store(VVals=v)
             
@@ -571,15 +486,19 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='Walker2d-v3')
-    parser.add_argument('--hid', type=str, default="[64,32]")
+    parser.add_argument('--hid', type=str, default="[32,32]")
+    # parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--cpu', type=int, default=4)
     parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--epochs', type=int, default=750)
+    parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='ppo')
     args = parser.parse_args()
 
+    # copy this code to /data/exp_name/ppo_cnp.py
+
+    
     hidden_dims = eval(args.hid)
 
     from spinup.utils.run_utils import setup_logger_kwargs
@@ -588,12 +507,6 @@ if __name__ == '__main__':
     os.makedirs(logger_kwargs['output_dir'], exist_ok=True)
     shutil.copyfile(__file__,
                     os.path.join(logger_kwargs['output_dir'], 'ppo_cnp.py')
-    )
-    shutil.copyfile(os.path.dirname(__file__) + "/core.py",
-                    os.path.join(logger_kwargs['output_dir'], 'core.py')
-    )
-    shutil.copyfile(os.path.dirname(__file__)+ "/models.py",
-                    os.path.join(logger_kwargs['output_dir'], 'models.py')
     )
     
     ppo_cnp(lambda : gym.make(args.env), actor_critic=core.CNPActorMLPCritic,

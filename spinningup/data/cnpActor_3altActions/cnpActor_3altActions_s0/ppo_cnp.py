@@ -24,6 +24,7 @@ class WorldModel: # :)
         self.env.set_state(qpos0, qvel0)
         return s, r, d, _
 
+        
 class PPOBuffer:
     def __init__(self, cont_dim, size, gamma=0.99, lam=0.95):
         
@@ -176,6 +177,7 @@ class PPOBuffer:
         # Imagined actions
         self.cont_out_alt, self.obs_out_alt, self.act_out_alt= [], [], []
         self.adv_out_alt = []
+
 
 def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
@@ -571,12 +573,12 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='Walker2d-v3')
-    parser.add_argument('--hid', type=str, default="[64,32]")
+    parser.add_argument('--hid', type=str, default="[32,32]")
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--cpu', type=int, default=4)
     parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--epochs', type=int, default=750)
+    parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='ppo')
     args = parser.parse_args()
 
@@ -589,10 +591,10 @@ if __name__ == '__main__':
     shutil.copyfile(__file__,
                     os.path.join(logger_kwargs['output_dir'], 'ppo_cnp.py')
     )
-    shutil.copyfile(os.path.dirname(__file__) + "/core.py",
+    shutil.copyfile("core.py",
                     os.path.join(logger_kwargs['output_dir'], 'core.py')
     )
-    shutil.copyfile(os.path.dirname(__file__)+ "/models.py",
+    shutil.copyfile("models.py",
                     os.path.join(logger_kwargs['output_dir'], 'models.py')
     )
     

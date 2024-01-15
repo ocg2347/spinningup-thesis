@@ -8,12 +8,10 @@ from spinup.utils.logx import EpochLogger
 import shutil
 import os
 
-context_window_len=10
-n_context_max=5
-use_time_input=True
+context_window_len=5
+n_context_max=0
+use_time_input=False
 n_alternative_actions=3
-train_alt_pi_iters=5
-grad_norm_clip=0.5
 
 class WorldModel: # :)
     def __init__(self, env):
@@ -24,6 +22,7 @@ class WorldModel: # :)
         self.env.set_state(qpos0, qvel0)
         return s, r, d, _
 
+        
 class PPOBuffer:
     def __init__(self, cont_dim, size, gamma=0.99, lam=0.95):
         
@@ -54,7 +53,6 @@ class PPOBuffer:
         self.rew_buf.append(rew)
         self.val_buf.append(val)
         self.logp_buf.append(logp)
-        
         self.cont_buf_alt.append(alt_conts)
         self.obs_buf_alt.append(alt_obss)
         self.act_buf_alt.append(alt_acts)
@@ -86,7 +84,6 @@ class PPOBuffer:
         M = len(self.act_buf_alt)
         for i in range(M):
             mean_r_alt, std_r_alt = np.mean(self.rew_buf_alt[i]), np.std(self.rew_buf_alt[i])
-            assert len(self.act_buf_alt[i]) == len(self.obs_buf_alt[i]) == len(self.rew_buf_alt[i]) == len(self.val_buf_alt[i]) == len(self.cont_buf_alt[i])
             for cont_alt, obs_alt, act_alt, rew_alt in zip(self.cont_buf_alt[i], self.obs_buf_alt[i], self.act_buf_alt[i], self.rew_buf_alt[i]):
                 self.obs_out_alt.append(obs_alt)
                 self.act_out_alt.append(act_alt)
@@ -97,7 +94,7 @@ class PPOBuffer:
         
     def prepare_context_and_mask_batch(self, cont_list):
 
-        M = len(cont_list)
+        M = len(self.obs_out)
         context_batch = torch.zeros(M, self.n_context_max, self.cont_dim, dtype=torch.float32)
         cont_mask_batch = torch.zeros(M, self.n_context_max, dtype=torch.float32)
         for i in range(M):
@@ -123,8 +120,6 @@ class PPOBuffer:
         # cont_mask_batch: M x n_context_max    
         assert len(self.cont_out) == len(self.obs_out) == len(self.act_out) == len(self.ret_out) == len(self.logp_out) == len(self.adv_out)
         context_batch_out, cont_mask_batch_out = self.prepare_context_and_mask_batch(self.cont_out)
-        assert context_batch_out.shape == (len(self.cont_out), self.n_context_max, self.cont_dim)
-        assert cont_mask_batch_out.shape == (len(self.cont_out), self.n_context_max)
         obs_out = np.stack(self.obs_out)
         obs_out = torch.tensor(obs_out, dtype=torch.float32)
         obs_out = obs_out.unsqueeze(1) # (M, obs_dim)->(M, 1, obs_dim)
@@ -134,7 +129,6 @@ class PPOBuffer:
 
         # Imagined actions
         assert len(self.cont_out_alt) == len(self.obs_out_alt) == len(self.act_out_alt) == len(self.adv_out_alt)
-        print("cont_out_alt: ", len(self.cont_out_alt))
         context_batch_out_alt, cont_mask_batch_out_alt = self.prepare_context_and_mask_batch(self.cont_out_alt)
         obs_out_alt = np.stack(self.obs_out_alt)
         obs_out_alt = torch.tensor(obs_out_alt, dtype=torch.float32)
@@ -176,6 +170,7 @@ class PPOBuffer:
         # Imagined actions
         self.cont_out_alt, self.obs_out_alt, self.act_out_alt= [], [], []
         self.adv_out_alt = []
+
 
 def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
@@ -388,7 +383,6 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
         )
     # Set up function for computing PPO policy loss
     def compute_loss_pi(data):
-        
         obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
         cont, cont_mask = data['cont'], data['cont_mask']
 
@@ -429,9 +423,9 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
 
     def update():
         data = buf.get()
-        # for k, v in data.items(): 
-        #     print(f"{k}: {v.shape}")
-
+        for k, v in data.items(): 
+            print(f"{k}: {v.shape}")
+        return
         buf.reset()
         
         pi_l_old, pi_info_old = compute_loss_pi(data)
@@ -448,25 +442,8 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
                 break
             loss_pi.backward()
             pi_optimizer.step()
-            
-        logger.store(StopIter=i)
 
-        # Alternative actions stuff              
-        cont_alt, cont_mask = data['cont_alt'], data['cont_mask_alt']
-        obs_alt, act_alt, adv_alt = data['obs_alt'], data['act_alt'], data['adv_alt']
-        for i in range(train_alt_pi_iters):
-            pi_optimizer.zero_grad()
-            _, logp = ac.pi(
-                observation=cont_alt, 
-                target=obs_alt,
-                target_truth=act_alt,
-                observation_mask=cont_mask
-            ) # (M, 1, 1)
-            loss = (-(logp * adv_alt)/10).mean()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(ac.pi.parameters(), grad_norm_clip)
-            pi_optimizer.step()
-            
+        logger.store(StopIter=i)
 
         # Value function learning
         for i in range(train_v_iters):
@@ -500,7 +477,7 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
             alt_obss = []
             alt_acts = []
             alt_rews = []
-            # alt_vals = []
+            alt_vals = []
             for _ in range(n_alternative_actions):
                 a_alt, logp_alt, context_alt = sample_action(o)
                 alt_conts.append(context_alt)
@@ -508,6 +485,7 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
                 alt_acts.append(a_alt)
                 s_alt, r_alt, d_alt, _ = world_model.step(a_alt)
                 alt_rews.append(r_alt)
+                
                 # alt_vals.append(ac.v(torch.as_tensor(s_alt, dtype=torch.float32)).detach().numpy())
                         
             next_o, r, d, _ = env.step(a)
@@ -571,12 +549,12 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='Walker2d-v3')
-    parser.add_argument('--hid', type=str, default="[64,32]")
+    parser.add_argument('--hid', type=str, default="[32,32]")
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--cpu', type=int, default=4)
     parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--epochs', type=int, default=750)
+    parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='ppo')
     args = parser.parse_args()
 
@@ -589,10 +567,10 @@ if __name__ == '__main__':
     shutil.copyfile(__file__,
                     os.path.join(logger_kwargs['output_dir'], 'ppo_cnp.py')
     )
-    shutil.copyfile(os.path.dirname(__file__) + "/core.py",
+    shutil.copyfile("core.py",
                     os.path.join(logger_kwargs['output_dir'], 'core.py')
     )
-    shutil.copyfile(os.path.dirname(__file__)+ "/models.py",
+    shutil.copyfile("models.py",
                     os.path.join(logger_kwargs['output_dir'], 'models.py')
     )
     
