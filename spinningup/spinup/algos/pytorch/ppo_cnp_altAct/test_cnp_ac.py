@@ -5,31 +5,26 @@ import torch
 from core import CNPActorMLPCritic
 
 # create environment
-env = gym.make('Walker2d-v3')
+env = gym.make("Walker2d-v3")
 obs_dim = env.observation_space.shape[0]
 act_dim = env.action_space.shape[0]
 print("obs_dim: ", obs_dim)
 print("act_dim: ", act_dim)
 
 # create ac
-ac = CNPActorMLPCritic(env.observation_space, 
-                       env.action_space,
-                          hidden_sizes=[64,32]
-)
+ac = CNPActorMLPCritic(env.observation_space, env.action_space, hidden_sizes=[64, 32])
 
 obs = env.reset()
-context = np.random.rand(1, 11,  obs_dim+act_dim)
+context = np.random.rand(1, 11, obs_dim + act_dim)
 
 
 dists = ac.pi._distribution(
-    context=torch.Tensor(context),
-    obs=torch.Tensor(obs).reshape(1, 1, obs_dim)
+    context=torch.Tensor(context), obs=torch.Tensor(obs).reshape(1, 1, obs_dim)
 )
 print(dists)
 
 ac.pi(
-    observation=torch.Tensor(context),
-    target=torch.Tensor(obs).reshape(1, 1, obs_dim)
+    observation=torch.Tensor(context), target=torch.Tensor(obs).reshape(1, 1, obs_dim)
 )
 
 

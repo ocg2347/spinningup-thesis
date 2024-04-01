@@ -182,17 +182,27 @@ class CNP_w_seperateSTD(nn.Module):
         self.log_std = torch.nn.Parameter(torch.as_tensor(log_std))
 
         self.encoder = []
-        encoder_layer_widths=[self.d_x + self.d_y] + encoder_hidden_sizes
-        for i in range(len(encoder_layer_widths)-1):
-            self.encoder.append(nn.Linear(encoder_layer_widths[i], encoder_layer_widths[i+1], bias=encoder_bias))
+        encoder_layer_widths = [self.d_x + self.d_y] + encoder_hidden_sizes
+        for i in range(len(encoder_layer_widths) - 1):
+            self.encoder.append(
+                nn.Linear(
+                    encoder_layer_widths[i],
+                    encoder_layer_widths[i + 1],
+                    bias=encoder_bias,
+                )
+            )
             self.encoder.append(activation())
-        self.encoder.append(nn.Linear(encoder_layer_widths[-1], encoder_output_size, bias=encoder_bias))
+        self.encoder.append(
+            nn.Linear(encoder_layer_widths[-1], encoder_output_size, bias=encoder_bias)
+        )
         self.encoder = nn.Sequential(*self.encoder)
-        
+
         self.query = []
-        decoder_layer_widths=[encoder_output_size + self.d_x] + decoder_hidden_sizes
-        for i in range(len(decoder_layer_widths)-1):
-            self.query.append(nn.Linear(decoder_layer_widths[i], decoder_layer_widths[i+1]))
+        decoder_layer_widths = [encoder_output_size + self.d_x] + decoder_hidden_sizes
+        for i in range(len(decoder_layer_widths) - 1):
+            self.query.append(
+                nn.Linear(decoder_layer_widths[i], decoder_layer_widths[i + 1])
+            )
             self.query.append(activation())
         self.query.append(nn.Linear(decoder_layer_widths[-1], self.d_y))
         self.query = nn.Sequential(*self.query)

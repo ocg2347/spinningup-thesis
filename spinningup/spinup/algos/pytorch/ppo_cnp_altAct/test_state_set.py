@@ -1,13 +1,15 @@
 import gym
 import numpy as np
 
-env = gym.make('Walker2d-v3')
+env = gym.make("Walker2d-v3")
 
 act = env.action_space.sample()
 
 s0 = env.reset()
 qpos0, qvel0 = env.sim.data.qpos.flat.copy(), env.sim.data.qvel.flat.copy()
-s0_computed = np.concatenate([qpos0[1:], np.clip(qvel0, -10, 10)]).ravel() # this is correct logic
+s0_computed = np.concatenate(
+    [qpos0[1:], np.clip(qvel0, -10, 10)]
+).ravel()  # this is correct logic
 print("s0: ", s0)
 print("qpos0: ", qpos0)
 print("qvel0: ", qvel0)

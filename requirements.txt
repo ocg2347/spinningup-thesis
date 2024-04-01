@@ -8,8 +8,7 @@ certifi==2020.6.20
 cffi==1.15.1
 cloudpickle==1.2.1
 cycler==0.11.0
-Cython==0.29.37
-dataclasses==0.8
+dataclasses==0.6
 decorator==5.1.1
 future==0.18.3
 gast==0.2.2
@@ -34,7 +33,7 @@ Markdown==3.3.7
 matplotlib==3.1.1
 mpi4py==3.1.5
 mujoco-py==1.50.1.68
-numpy==1.18.5
+numpy==1.26.4
 opencv-python==3.4.13.47
 opt-einsum==3.3.0
 packaging==21.3

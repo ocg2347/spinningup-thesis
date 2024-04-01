@@ -8,29 +8,30 @@ from spinup.utils.logx import EpochLogger
 import shutil
 import os
 
-context_window_len=5
-n_context_max=0
-use_time_input=False
+context_window_len = 5
+n_context_max = 0
+use_time_input = False
+
 
 class PPOBuffer:
     def __init__(self, cont_dim, size, gamma=0.99, lam=0.95):
-        
+
         self.n_context_max = max(1, n_context_max)
         self.cont_dim = cont_dim
         self.cont_buf, self.obs_buf, self.act_buf = [], [], []
         self.rew_buf, self.val_buf, self.logp_buf = [], [], []
-        
+
         self.cont_out, self.obs_out, self.act_out = [], [], []
         self.ret_out, self.logp_out, self.adv_out = [], [], []
 
     @property
     def rollout_size(self):
         return len(self.obs_buf)
-    
+
     @property
     def total_size(self):
         return len(self.obs_out)
-    
+
     def store(self, conts, obs, act, rew, val, logp):
         self.cont_buf.append(conts)
         self.obs_buf.append(obs)
@@ -38,76 +39,99 @@ class PPOBuffer:
         self.rew_buf.append(rew)
         self.val_buf.append(val)
         self.logp_buf.append(logp)
-        
 
     def finish_path(self, last_val=0):
 
-        assert len(self.act_buf) == len(self.obs_buf) == len(self.rew_buf) == len(self.val_buf) == len(self.logp_buf) == len(self.cont_buf)
+        assert (
+            len(self.act_buf)
+            == len(self.obs_buf)
+            == len(self.rew_buf)
+            == len(self.val_buf)
+            == len(self.logp_buf)
+            == len(self.cont_buf)
+        )
 
         self.obs_out.extend(self.obs_buf)
         self.act_out.extend(self.act_buf)
         self.cont_out.extend(self.cont_buf)
         self.logp_out.extend(self.logp_buf)
-        
+
         self.rew_buf.append(last_val)
         self.val_buf.append(last_val)
-        
+
         rews = np.array(self.rew_buf)
         vals = np.array(self.val_buf)
 
         # the next two lines implement GAE-Lambda advantage calculation
         deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
         self.adv_out.extend(core.discount_cumsum(deltas, self.gamma * self.lam))
-        
+
         # the next line computes rewards-to-go, to be targets for the value function
         self.ret_out.extend(core.discount_cumsum(rews, self.gamma)[:-1])
 
         self.reset_rollout()
-        
+
     def prepare_context_and_mask_batch(self, cont_list):
-        assert len(cont_list) == len(self.obs_out) == len(self.act_out) == len(self.adv_out) == len(self.ret_out) == len(self.logp_out)
+        assert (
+            len(cont_list)
+            == len(self.obs_out)
+            == len(self.act_out)
+            == len(self.adv_out)
+            == len(self.ret_out)
+            == len(self.logp_out)
+        )
         M = len(self.obs_out)
-        context_batch = torch.zeros(M, self.n_context_max, self.cont_dim, dtype=torch.float32)
+        context_batch = torch.zeros(
+            M, self.n_context_max, self.cont_dim, dtype=torch.float32
+        )
         cont_mask_batch = torch.zeros(M, self.n_context_max, dtype=torch.float32)
         for i in range(M):
             n_context_i = cont_list[i].shape[1]
             context_batch[i, :n_context_i, :] = torch.tensor(
                 cont_list[i], dtype=torch.float32
             )
-            cont_mask_batch[i, :n_context_i] = torch.ones(n_context_i, dtype=torch.float32)
+            cont_mask_batch[i, :n_context_i] = torch.ones(
+                n_context_i, dtype=torch.float32
+            )
         return context_batch, cont_mask_batch
-    
+
     def get(self):
-        
-        if not self.total_size == self.max_size:    # buffer has to be full before you can get
-            print(f"Warning: buffer has to be full before you can get, current size: {self.total_size}")
+
+        if (
+            not self.total_size == self.max_size
+        ):  # buffer has to be full before you can get
+            print(
+                f"Warning: buffer has to be full before you can get, current size: {self.total_size}"
+            )
             print("get: obs_buf: ", len(self.obs_buf))
-            
+
         # print("get: rollout_size: ", self.rollout_size)
         # print("get: total_size: ", self.total_size)
         # the next two lines implement the advantage normalization trick
         adv_mean, adv_std = np.mean(self.adv_out), np.std(self.adv_out)
-        
+
         adv_out = (self.adv_out - adv_mean) / adv_std
 
         # context_batch: M x n_context_max x (obs_dim + act_dim)
-        # cont_mask_batch: M x n_context_max    
-        context_batch_out, cont_mask_batch_out = self.prepare_context_and_mask_batch(self.cont_out)
+        # cont_mask_batch: M x n_context_max
+        context_batch_out, cont_mask_batch_out = self.prepare_context_and_mask_batch(
+            self.cont_out
+        )
         obs_out = np.stack(self.obs_out)
         obs_out = torch.tensor(obs_out, dtype=torch.float32)
-        obs_out = obs_out.unsqueeze(1) # (M, obs_dim)->(M, 1, obs_dim)
-        act_out = np.stack(self.act_out) # (M, act_dim)
+        obs_out = obs_out.unsqueeze(1)  # (M, obs_dim)->(M, 1, obs_dim)
+        act_out = np.stack(self.act_out)  # (M, act_dim)
         act_out = torch.tensor(act_out, dtype=torch.float32)
-        act_out = act_out.unsqueeze(1) # (M, act_dim)->(M, 1, act_dim)
+        act_out = act_out.unsqueeze(1)  # (M, act_dim)->(M, 1, act_dim)
 
         data = dict(
             cont=context_batch_out,
             cont_mask=cont_mask_batch_out,
             obs=obs_out,
             act=act_out,
-            ret=torch.tensor(self.ret_out, dtype=torch.float32).reshape(-1,1,1),
-            adv=torch.tensor(adv_out, dtype=torch.float32).reshape(-1,1,1),
-            logp=torch.tensor(self.logp_out, dtype=torch.float32).reshape(-1,1,1),
+            ret=torch.tensor(self.ret_out, dtype=torch.float32).reshape(-1, 1, 1),
+            adv=torch.tensor(adv_out, dtype=torch.float32).reshape(-1, 1, 1),
+            logp=torch.tensor(self.logp_out, dtype=torch.float32).reshape(-1, 1, 1),
         )
         self.reset()
         return data
@@ -115,18 +139,32 @@ class PPOBuffer:
     def reset_rollout(self):
         self.cont_buf, self.obs_buf, self.act_buf = [], [], []
         self.rew_buf, self.val_buf, self.logp_buf = [], [], []
-        
+
     def reset(self):
         self.reset_rollout()
         self.cont_out, self.obs_out, self.act_out = [], [], []
         self.ret_out, self.logp_out, self.adv_out = [], [], []
-        
 
 
-def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=0, 
-        steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
-        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=10):
+def ppo_cnp(
+    env_fn,
+    actor_critic=core.CNPActorMLPCritic,
+    ac_kwargs=dict(),
+    seed=0,
+    steps_per_epoch=4000,
+    epochs=50,
+    gamma=0.99,
+    clip_ratio=0.2,
+    pi_lr=3e-4,
+    vf_lr=1e-3,
+    train_pi_iters=80,
+    train_v_iters=80,
+    lam=0.97,
+    max_ep_len=1000,
+    target_kl=0.01,
+    logger_kwargs=dict(),
+    save_freq=10,
+):
     print(
         f"env_fn: {env_fn}\n",
         f"actor_critic: {actor_critic}\n",
@@ -145,7 +183,7 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
         f"target_kl: {target_kl}\n",
         f"logger_kwargs: {logger_kwargs}\n",
         f"save_freq: {save_freq}\n",
-        sep=""        
+        sep="",
     )
     """
     Proximal Policy Optimization (by clipping), 
@@ -250,7 +288,6 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
 
     """
 
-
     # Set up logger and save configuration
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
@@ -266,20 +303,22 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
     context_dim = obs_dim + act_dim
 
     # Create actor-critic module
-    ac = actor_critic(env.observation_space, 
-                      env.action_space, 
-                      use_time_input=use_time_input, 
-                      encoder_output_size=8,
-                      **ac_kwargs)
+    ac = actor_critic(
+        env.observation_space,
+        env.action_space,
+        use_time_input=use_time_input,
+        encoder_output_size=8,
+        **ac_kwargs,
+    )
 
     # Count variables
     var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.v])
-    logger.log('\nNumber of parameters: \t pi: %d, \t v: %d\n'%var_counts)
+    logger.log("\nNumber of parameters: \t pi: %d, \t v: %d\n" % var_counts)
 
     # Set up experience buffer
     local_steps_per_epoch = int(steps_per_epoch / 1)
     buf = PPOBuffer(cont_dim=context_dim, size=local_steps_per_epoch)
-    
+
     # sample action using the last s,a as context and current s as target
     @torch.no_grad()
     def sample_action(o, deterministic=False):
@@ -314,7 +353,7 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
         a_mean, a_std = ac.pi.cnp(
             observation=context_points,
             target=torch.as_tensor(o, dtype=torch.float32).reshape(1, 1, obs_dim),
-        )  
+        )
         a_mean = a_mean[0, 0, :]
         if deterministic:
             a = a_mean
@@ -323,32 +362,30 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
         # compute log prob of the action using a_man, a_std
         a_dist = torch.distributions.Normal(a_mean, a_std)
         log_p = a_dist.log_prob(a).sum()  # (1, 1, act_dim) -> (1, 1)
-        
+
         return (
             a.numpy(),
             log_p.item(),
             context_points.numpy(),
         )
+
     # Set up function for computing PPO policy loss
     def compute_loss_pi(data):
-        obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
-        cont, cont_mask = data['cont'], data['cont_mask']
+        obs, act, adv, logp_old = data["obs"], data["act"], data["adv"], data["logp"]
+        cont, cont_mask = data["cont"], data["cont_mask"]
 
         pi, logp = ac.pi(
-            observation=cont, 
-            target=obs,
-            target_truth=act,
-            observation_mask=cont_mask
-        ) # (M, 1, 1)
+            observation=cont, target=obs, target_truth=act, observation_mask=cont_mask
+        )  # (M, 1, 1)
 
         ratio = torch.exp(logp - logp_old)
-        clip_adv = torch.clamp(ratio, 1-clip_ratio, 1+clip_ratio) * adv
+        clip_adv = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * adv
         loss_pi = -(torch.min(ratio * adv, clip_adv)).mean()
 
         # Useful extra info
         approx_kl = (logp_old - logp).mean().item()
         ent = pi.entropy().mean().item()
-        clipped = ratio.gt(1+clip_ratio) | ratio.lt(1-clip_ratio)
+        clipped = ratio.gt(1 + clip_ratio) | ratio.lt(1 - clip_ratio)
         clipfrac = torch.as_tensor(clipped, dtype=torch.float32).mean().item()
         pi_info = dict(kl=approx_kl, ent=ent, cf=clipfrac)
 
@@ -356,11 +393,11 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
 
     # Set up function for computing value loss
     def compute_loss_v(data):
-        obs, ret = data['obs'], data['ret']
+        obs, ret = data["obs"], data["ret"]
         if use_time_input:
             obs = obs[:, 0, 1:]
         ret = ret.reshape(-1, 1)
-        return ((ac.v(obs) - ret)**2).mean()
+        return ((ac.v(obs) - ret) ** 2).mean()
 
     # Set up optimizers for policy and value function
     pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
@@ -372,10 +409,10 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
     def update():
         ac.pi.train()
         ac.v.train()
-        
+
         data = buf.get()
         buf.reset()
-        
+
         pi_l_old, pi_info_old = compute_loss_pi(data)
         pi_l_old = pi_l_old.item()
         v_l_old = compute_loss_v(data).item()
@@ -384,9 +421,9 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
         for i in range(train_pi_iters):
             pi_optimizer.zero_grad()
             loss_pi, pi_info = compute_loss_pi(data)
-            kl = pi_info['kl']
+            kl = pi_info["kl"]
             if kl > 1.5 * target_kl:
-                logger.log('Early stopping at step %d due to reaching max kl.'%i)
+                logger.log("Early stopping at step %d due to reaching max kl." % i)
                 break
             loss_pi.backward()
             pi_optimizer.step()
@@ -401,15 +438,20 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
             vf_optimizer.step()
 
         # Log changes from update
-        kl, ent, cf = pi_info['kl'], pi_info_old['ent'], pi_info['cf']
-        logger.store(LossPi=pi_l_old, LossV=v_l_old,
-                     KL=kl, Entropy=ent, ClipFrac=cf,
-                     DeltaLossPi=(loss_pi.item() - pi_l_old),
-                     DeltaLossV=(loss_v.item() - v_l_old))
+        kl, ent, cf = pi_info["kl"], pi_info_old["ent"], pi_info["cf"]
+        logger.store(
+            LossPi=pi_l_old,
+            LossV=v_l_old,
+            KL=kl,
+            Entropy=ent,
+            ClipFrac=cf,
+            DeltaLossPi=(loss_pi.item() - pi_l_old),
+            DeltaLossV=(loss_v.item() - v_l_old),
+        )
 
         ac.pi.eval()
         ac.v.eval()
-        
+
     # Prepare for interaction with environment
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
@@ -422,7 +464,7 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
             if use_time_input:
                 o = np.insert(o, 0, 0.0)  # insert 0 in the beginning!!!
             a, logp, context_points = sample_action(o)
-            
+
             next_o, r, d, _ = env.step(a)
             ep_ret += r
             ep_len += 1
@@ -437,17 +479,20 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
                 logp=logp,
             )
             logger.store(VVals=v)
-            
+
             # Update obs (critical!)
             o = next_o
 
             timeout = ep_len == max_ep_len
             terminal = d or timeout
-            epoch_ended = t==local_steps_per_epoch-1
+            epoch_ended = t == local_steps_per_epoch - 1
 
             if terminal or epoch_ended:
-                if epoch_ended and not(terminal):
-                    print('Warning: trajectory cut off by epoch at %d steps.'%ep_len, flush=True)
+                if epoch_ended and not (terminal):
+                    print(
+                        "Warning: trajectory cut off by epoch at %d steps." % ep_len,
+                        flush=True,
+                    )
                 # if trajectory didn't reach terminal state, bootstrap value target
                 if timeout or epoch_ended:
                     v = ac.v(torch.as_tensor(o, dtype=torch.float32)).detach().numpy()
@@ -459,64 +504,64 @@ def ppo_cnp(env_fn, actor_critic=core.CNPActorMLPCritic, ac_kwargs=dict(), seed=
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
                 o, ep_ret, ep_len = env.reset(), 0, 0
 
-
         # Save model
-        if (epoch % save_freq == 0) or (epoch == epochs-1):
-            logger.save_state({'env': env}, None)
+        if (epoch % save_freq == 0) or (epoch == epochs - 1):
+            logger.save_state({"env": env}, None)
 
         # Perform PPO update!
         update()
 
         # Log info about epoch
-        logger.log_tabular('Epoch', epoch)
-        logger.log_tabular('EpRet', with_min_and_max=True)
-        logger.log_tabular('EpLen', average_only=True)
-        logger.log_tabular('VVals', with_min_and_max=True)
-        logger.log_tabular('TotalEnvInteracts', (epoch+1)*steps_per_epoch)
-        logger.log_tabular('LossPi', average_only=True)
-        logger.log_tabular('LossV', average_only=True)
-        logger.log_tabular('DeltaLossPi', average_only=True)
-        logger.log_tabular('DeltaLossV', average_only=True)
-        logger.log_tabular('Entropy', average_only=True)
-        logger.log_tabular('KL', average_only=True)
-        logger.log_tabular('ClipFrac', average_only=True)
-        logger.log_tabular('StopIter', average_only=True)
-        logger.log_tabular('Time', time.time()-start_time)
+        logger.log_tabular("Epoch", epoch)
+        logger.log_tabular("EpRet", with_min_and_max=True)
+        logger.log_tabular("EpLen", average_only=True)
+        logger.log_tabular("VVals", with_min_and_max=True)
+        logger.log_tabular("TotalEnvInteracts", (epoch + 1) * steps_per_epoch)
+        logger.log_tabular("LossPi", average_only=True)
+        logger.log_tabular("LossV", average_only=True)
+        logger.log_tabular("DeltaLossPi", average_only=True)
+        logger.log_tabular("DeltaLossV", average_only=True)
+        logger.log_tabular("Entropy", average_only=True)
+        logger.log_tabular("KL", average_only=True)
+        logger.log_tabular("ClipFrac", average_only=True)
+        logger.log_tabular("StopIter", average_only=True)
+        logger.log_tabular("Time", time.time() - start_time)
         logger.dump_tabular()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='Walker2d-v3')
-    parser.add_argument('--hid', type=str, default="[32,32]")
+    parser.add_argument("--env", type=str, default="Walker2d-v3")
+    parser.add_argument("--hid", type=str, default="[32,32]")
     # parser.add_argument('--l', type=int, default=2)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--cpu', type=int, default=4)
-    parser.add_argument('--steps', type=int, default=4000)
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--exp_name', type=str, default='ppo')
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--seed", "-s", type=int, default=0)
+    parser.add_argument("--cpu", type=int, default=4)
+    parser.add_argument("--steps", type=int, default=4000)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--exp_name", type=str, default="ppo")
     args = parser.parse_args()
 
     hidden_dims = eval(args.hid)
 
     from spinup.utils.run_utils import setup_logger_kwargs
+
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
-    os.makedirs(logger_kwargs['output_dir'], exist_ok=True)
-    shutil.copyfile(__file__,
-                    os.path.join(logger_kwargs['output_dir'], 'ppo_cnp.py')
-    )
-    shutil.copyfile("core.py",
-                    os.path.join(logger_kwargs['output_dir'], 'core.py')
-    )
-    shutil.copyfile("models.py",
-                    os.path.join(logger_kwargs['output_dir'], 'models.py')
-    )
-    
-    ppo_cnp(lambda : gym.make(args.env), actor_critic=core.CNPActorMLPCritic,
-        ac_kwargs=dict(hidden_sizes=hidden_dims), gamma=args.gamma, 
-        seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
-        logger_kwargs=logger_kwargs)
-    
+    os.makedirs(logger_kwargs["output_dir"], exist_ok=True)
+    shutil.copyfile(__file__, os.path.join(logger_kwargs["output_dir"], "ppo_cnp.py"))
+    shutil.copyfile("core.py", os.path.join(logger_kwargs["output_dir"], "core.py"))
+    shutil.copyfile("models.py", os.path.join(logger_kwargs["output_dir"], "models.py"))
 
+    ppo_cnp(
+        lambda: gym.make(args.env),
+        actor_critic=core.CNPActorMLPCritic,
+        ac_kwargs=dict(hidden_sizes=hidden_dims),
+        gamma=args.gamma,
+        seed=args.seed,
+        steps_per_epoch=args.steps,
+        epochs=args.epochs,
+        logger_kwargs=logger_kwargs,
+    )
