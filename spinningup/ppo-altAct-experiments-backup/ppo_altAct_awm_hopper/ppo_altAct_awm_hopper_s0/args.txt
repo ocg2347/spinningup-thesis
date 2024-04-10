@@ -1,0 +1,1 @@
+Namespace(alt_act_adv=None, cpu=4, env='Hopper-v3', epochs=300, exp_name='ppo_altAct_awm_hopper', gamma=0.99, hid='[64,32]', n_alternative_actions=3, seed=0, steps=4000)

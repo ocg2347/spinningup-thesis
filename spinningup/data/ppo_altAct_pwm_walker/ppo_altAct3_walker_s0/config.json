@@ -1,0 +1,45 @@
+{
+    "ac_kwargs":	{
+        "hidden_sizes":	[
+            64,
+            32
+        ]
+    },
+    "actor_critic":	"MLPActorCritic",
+    "clip_ratio":	0.2,
+    "env_fn":	"<function <lambda> at 0x743d4913b830>",
+    "epochs":	750,
+    "exp_name":	"ppo_altAct3_walker",
+    "gamma":	0.99,
+    "lam":	0.97,
+    "logger":	{
+        "<spinup.utils.logx.EpochLogger object at 0x743d4912bcd0>":	{
+            "epoch_dict":	{},
+            "exp_name":	"ppo_altAct3_walker",
+            "first_row":	true,
+            "log_current_row":	{},
+            "log_headers":	[],
+            "output_dir":	"/home/muhammet-colors/Desktop/from-ec2/spinningup/data/ppo_altAct3_walker/ppo_altAct3_walker_s0",
+            "output_file":	{
+                "<_io.TextIOWrapper name='/home/muhammet-colors/Desktop/from-ec2/spinningup/data/ppo_altAct3_walker/ppo_altAct3_walker_s0/progress.txt' mode='w' encoding='UTF-8'>":	{
+                    "mode":	"w"
+                }
+            }
+        }
+    },
+    "logger_kwargs":	{
+        "exp_name":	"ppo_altAct3_walker",
+        "output_dir":	"/home/muhammet-colors/Desktop/from-ec2/spinningup/data/ppo_altAct3_walker/ppo_altAct3_walker_s0"
+    },
+    "max_ep_len":	1000,
+    "n_alternative_actions":	3,
+    "pi_lr":	0.0003,
+    "save_freq":	10,
+    "seed":	0,
+    "steps_per_epoch":	4000,
+    "target_kl":	0.01,
+    "train_alt_pi_iters":	5,
+    "train_pi_iters":	80,
+    "train_v_iters":	80,
+    "vf_lr":	0.001
+}

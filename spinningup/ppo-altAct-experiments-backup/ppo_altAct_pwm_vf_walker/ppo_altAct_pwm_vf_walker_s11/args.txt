@@ -1,0 +1,1 @@
+Namespace(alt_act_adv='val', cpu=4, env='Walker2d-v3', epochs=750, exp_name='ppo_altAct_pwm_vf_walker', gamma=0.99, hid='[64,32]', n_alternative_actions=3, seed=11, steps=4000)
